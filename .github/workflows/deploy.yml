@@ -39,22 +39,15 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} ./hello-world
           docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          echo "Image successfully pushed to ECR:"
+          echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
 
-      - name: Deploy to AWS App Runner
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      - name: Check available AWS services
         run: |
-          SERVICE_NAME=hello-world-apprunner
-          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          # Prüfe, ob Service existiert
-          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" --output text)
-          if [ -z "$SERVICE_ARN" ]; then
-            echo "Creating new App Runner service..."
-            aws apprunner create-service \
-              --service-name $SERVICE_NAME \
-              --source-configuration ImageRepository={ImageIdentifier=$IMAGE_URI,ImageRepositoryType=ECR} \
-              --instance-configuration Cpu=1 vCPU,Memory=2 GB
-          else
-            echo "Updating existing App Runner service..."
-            aws apprunner update-service --service-arn $SERVICE_ARN --source-configuration ImageRepository={ImageIdentifier=$IMAGE_URI,ImageRepositoryType=ECR}
-          fi
+          echo "Checking available AWS services in this lab environment..."
+          echo "ECR repositories:"
+          aws ecr describe-repositories --output table || echo "ECR access limited"
+          echo "Checking App Runner permissions:"
+          aws apprunner list-services --output table || echo "App Runner not available in this lab"
+          echo "Checking ECS permissions:"
+          aws ecs list-clusters --output table || echo "ECS not available in this lab"
