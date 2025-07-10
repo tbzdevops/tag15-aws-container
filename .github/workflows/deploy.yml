@@ -68,6 +68,41 @@ jobs:
               --memory-size 512 || echo "Lambda creation failed, trying EC2 deployment..."
           fi
 
+      - name: Create Lambda Function URL and display access information
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          FUNCTION_NAME=hello-world-lambda
+          
+          echo "Setting up public access to your container..."
+          
+          # Create or update function URL configuration
+          FUNCTION_URL=$(aws lambda create-function-url-config \
+            --function-name $FUNCTION_NAME \
+            --auth-type NONE \
+            --cors 'AllowCredentials=false,AllowHeaders=date,keep-alive,AllowMethods=*,AllowOrigins=*,ExposeHeaders=date,keep-alive,MaxAge=86400' \
+            --query 'FunctionUrl' --output text 2>/dev/null || \
+            aws lambda get-function-url-config --function-name $FUNCTION_NAME --query 'FunctionUrl' --output text 2>/dev/null)
+          
+          if [ ! -z "$FUNCTION_URL" ]; then
+            echo "=============================================="
+            echo "🎉 DEPLOYMENT SUCCESSFUL!"
+            echo "=============================================="
+            echo "Your container is now running and accessible at:"
+            echo ""
+            echo "📍 Function URL: $FUNCTION_URL"
+            echo ""
+            echo "You can view your Hello World application by opening this URL in your browser."
+            echo "=============================================="
+            
+            # Also get the Lambda function ARN for reference
+            FUNCTION_ARN=$(aws lambda get-function --function-name $FUNCTION_NAME --query 'Configuration.FunctionArn' --output text)
+            echo "📋 Lambda Function ARN: $FUNCTION_ARN"
+            echo "🐳 Container Image: $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          else
+            echo "❌ Failed to create Function URL. The Lambda function may not have been created successfully."
+          fi
+
       - name: Try EC2 deployment as fallback
         if: failure()
         env:
