@@ -42,12 +42,43 @@ jobs:
           echo "Image successfully pushed to ECR:"
           echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
 
-      - name: Check available AWS services
+      - name: Deploy to AWS Lambda (Container)
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          echo "Checking available AWS services in this lab environment..."
-          echo "ECR repositories:"
-          aws ecr describe-repositories --output table || echo "ECR access limited"
-          echo "Checking App Runner permissions:"
-          aws apprunner list-services --output table || echo "App Runner not available in this lab"
-          echo "Checking ECS permissions:"
-          aws ecs list-clusters --output table || echo "ECS not available in this lab"
+          FUNCTION_NAME=hello-world-lambda
+          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          
+          echo "Attempting to deploy container to AWS Lambda..."
+          
+          # Check if function exists
+          if aws lambda get-function --function-name $FUNCTION_NAME > /dev/null 2>&1; then
+            echo "Updating existing Lambda function..."
+            aws lambda update-function-code \
+              --function-name $FUNCTION_NAME \
+              --image-uri $IMAGE_URI
+          else
+            echo "Creating new Lambda function..."
+            aws lambda create-function \
+              --function-name $FUNCTION_NAME \
+              --package-type Image \
+              --code ImageUri=$IMAGE_URI \
+              --role arn:aws:iam::200186773643:role/LabRole \
+              --timeout 30 \
+              --memory-size 512 || echo "Lambda creation failed, trying EC2 deployment..."
+          fi
+
+      - name: Try EC2 deployment as fallback
+        if: failure()
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          echo "Lambda deployment failed, checking EC2 options..."
+          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          
+          # List available EC2 instances
+          echo "Available EC2 instances:"
+          aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress]' --output table || echo "No EC2 access"
+          
+          echo "Container image ready for manual deployment: $IMAGE_URI"
+          echo "You can manually deploy this to EC2 or other available compute services."
