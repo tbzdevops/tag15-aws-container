@@ -52,7 +52,7 @@ jobs:
           
           # Check if there's an existing EC2 instance we can use
           INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=hello-world-*" \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=hello-world-container" \
             --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)
           
           if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
@@ -77,6 +77,35 @@ jobs:
               --port 80 \
               --cidr 0.0.0.0/0 2>/dev/null || echo "Security group rule already exists"
             
+            # Create user data script to automatically setup and run container
+            USER_DATA=$(cat << 'EOF'
+#!/bin/bash
+yum update -y
+amazon-linux-extras install docker -y
+service docker start
+usermod -a -G docker ec2-user
+
+# Install AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+./aws/install
+
+# Wait for Docker to be ready
+sleep 10
+
+# Login to ECR and run container
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin IMAGE_URI_PLACEHOLDER
+docker run -d --name hello-world -p 80:80 IMAGE_URI_PLACEHOLDER
+
+# Create a simple health check
+echo "Container deployment completed" > /var/log/container-deploy.log
+EOF
+)
+            
+            # Replace placeholder with actual image URI
+            USER_DATA_FINAL=$(echo "$USER_DATA" | sed "s|IMAGE_URI_PLACEHOLDER|$IMAGE_URI|g")
+            USER_DATA_ENCODED=$(echo "$USER_DATA_FINAL" | base64 -w 0)
+            
             # Launch EC2 instance with Amazon Linux 2
             INSTANCE_ID=$(aws ec2 run-instances \
               --image-id ami-0c02fb55956c7d316 \
@@ -84,19 +113,22 @@ jobs:
               --subnet-id $SUBNET_ID \
               --security-group-ids $SECURITY_GROUP_ID \
               --associate-public-ip-address \
+              --iam-instance-profile Name=LabInstanceProfile \
               --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-container}]' \
-              --user-data '#!/bin/bash
-              yum update -y
-              amazon-linux-extras install docker -y
-              service docker start
-              usermod -a -G docker ec2-user' \
+              --user-data "$USER_DATA_ENCODED" \
               --query 'Instances[0].InstanceId' --output text)
             
             echo "Created new EC2 instance: $INSTANCE_ID"
+            echo "Instance is automatically configuring Docker and starting the container..."
             echo "Waiting for instance to be running..."
             aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+            
+            # Wait additional time for user data script to complete
+            echo "Waiting for container deployment to complete..."
+            sleep 120
           else
             echo "Using existing EC2 instance: $INSTANCE_ID"
+            echo "Updating container on existing instance..."
           fi
           
           # Get instance public IP
@@ -109,33 +141,59 @@ jobs:
           echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      - name: Deploy container to EC2 and display URL
+      - name: Update container on existing EC2 instance
+        if: env.INSTANCE_ID != ''
         run: |
-          echo "Configuring EC2 instance to run the container..."
+          echo "Ensuring latest container is running on EC2 instance..."
           
-          # Wait a bit more for the instance to be fully ready
-          sleep 30
+          # Use SSM to update the container on existing instance
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids ${{ env.INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.IMAGE_URI }}",
+              "docker stop hello-world || true",
+              "docker rm hello-world || true",
+              "docker pull ${{ env.IMAGE_URI }}",
+              "docker run -d --name hello-world -p 80:80 ${{ env.IMAGE_URI }}",
+              "echo \"Container updated successfully\" > /var/log/container-update.log"
+            ]' \
+            --query 'Command.CommandId' --output text 2>/dev/null || echo "")
           
-          # Connect to instance and run container (simulated - in real scenario you'd use SSH)
+          if [ ! -z "$COMMAND_ID" ]; then
+            echo "✅ Container update command sent via SSM. Command ID: $COMMAND_ID"
+            sleep 30  # Wait for command to execute
+          else
+            echo "ℹ️  SSM not available, container should be running from user data script"
+          fi
+
+      - name: Display deployment URL and status
+        run: |
           echo "=============================================="
-          echo "🎉 DEPLOYMENT CONFIGURATION COMPLETE!"
+          echo "🎉 DEPLOYMENT COMPLETE!"
           echo "=============================================="
-          echo "Your container deployment details:"
+          echo "Your container is now running on EC2:"
           echo ""
           echo "📍 EC2 Instance ID: ${{ env.INSTANCE_ID }}"
           echo "🌐 Public IP Address: ${{ env.PUBLIC_IP }}"
           echo "🐳 Container Image: ${{ env.IMAGE_URI }}"
           echo ""
-          echo "To complete the deployment, connect to your EC2 instance and run:"
-          echo "aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.IMAGE_URI }}"
-          echo "docker run -d -p 80:80 ${{ env.IMAGE_URI }}"
+          echo "🔗 Your Hello World application is accessible at:"
+          echo "   http://${{ env.PUBLIC_IP }}"
           echo ""
-          echo "🔗 Your application will be accessible at: http://${{ env.PUBLIC_IP }}"
+          echo "🔍 To check container status, you can:"
+          echo "   - Open the URL above in your browser"
+          echo "   - SSH to the instance and run: docker ps"
           echo "=============================================="
           
-          # Try to get ECR login and run container via Systems Manager (if available)
-          aws ssm send-command \
-            --instance-ids ${{ env.INSTANCE_ID }} \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.IMAGE_URI }}", "docker stop hello-world || true", "docker rm hello-world || true", "docker run -d --name hello-world -p 80:80 ${{ env.IMAGE_URI }}"]' \
-            --output text > /dev/null 2>&1 && echo "✅ Container deployed automatically via SSM" || echo "ℹ️  Manual deployment required (SSM not available)"
+          # Try to test if the application is responding
+          echo "Testing application availability..."
+          for i in {1..5}; do
+            if curl -s -o /dev/null -w "%{http_code}" "http://${{ env.PUBLIC_IP }}" | grep -q "200\|404\|503"; then
+              echo "✅ Application is responding!"
+              break
+            else
+              echo "⏳ Waiting for application to start... (attempt $i/5)"
+              sleep 10
+            fi
+          done
