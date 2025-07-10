@@ -43,7 +43,7 @@ jobs:
       - name: Deploy to ECS (example, update as needed)
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
-          task-definition: ecs-task-def.json # Passe ggf. an
+          task-definition: hello-world/ecs-task-def.json # Passe ggf. an
           service: hello-world-service # Passe ggf. an
           cluster: hello-world-cluster # Passe ggf. an
           wait-for-service-stability: true
