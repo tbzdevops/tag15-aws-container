@@ -42,78 +42,100 @@ jobs:
           echo "Image successfully pushed to ECR:"
           echo "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
 
-      - name: Deploy to AWS Lambda (Container)
+      - name: Deploy to EC2 Instance
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          FUNCTION_NAME=hello-world-lambda
           IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
           
-          echo "Attempting to deploy container to AWS Lambda..."
+          echo "Attempting to deploy container to EC2..."
           
-          # Check if function exists
-          if aws lambda get-function --function-name $FUNCTION_NAME > /dev/null 2>&1; then
-            echo "Updating existing Lambda function..."
-            aws lambda update-function-code \
-              --function-name $FUNCTION_NAME \
-              --image-uri $IMAGE_URI
-          else
-            echo "Creating new Lambda function..."
-            aws lambda create-function \
-              --function-name $FUNCTION_NAME \
-              --package-type Image \
-              --code ImageUri=$IMAGE_URI \
-              --role arn:aws:iam::200186773643:role/LabRole \
-              --timeout 30 \
-              --memory-size 512 || echo "Lambda creation failed, trying EC2 deployment..."
-          fi
-
-      - name: Create Lambda Function URL and display access information
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          FUNCTION_NAME=hello-world-lambda
+          # Check if there's an existing EC2 instance we can use
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=hello-world-*" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)
           
-          echo "Setting up public access to your container..."
-          
-          # Create or update function URL configuration
-          FUNCTION_URL=$(aws lambda create-function-url-config \
-            --function-name $FUNCTION_NAME \
-            --auth-type NONE \
-            --cors 'AllowCredentials=false,AllowHeaders=date,keep-alive,AllowMethods=*,AllowOrigins=*,ExposeHeaders=date,keep-alive,MaxAge=86400' \
-            --query 'FunctionUrl' --output text 2>/dev/null || \
-            aws lambda get-function-url-config --function-name $FUNCTION_NAME --query 'FunctionUrl' --output text 2>/dev/null)
-          
-          if [ ! -z "$FUNCTION_URL" ]; then
-            echo "=============================================="
-            echo "🎉 DEPLOYMENT SUCCESSFUL!"
-            echo "=============================================="
-            echo "Your container is now running and accessible at:"
-            echo ""
-            echo "📍 Function URL: $FUNCTION_URL"
-            echo ""
-            echo "You can view your Hello World application by opening this URL in your browser."
-            echo "=============================================="
+          if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "No existing hello-world EC2 instance found. Creating new instance..."
             
-            # Also get the Lambda function ARN for reference
-            FUNCTION_ARN=$(aws lambda get-function --function-name $FUNCTION_NAME --query 'Configuration.FunctionArn' --output text)
-            echo "📋 Lambda Function ARN: $FUNCTION_ARN"
-            echo "🐳 Container Image: $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+            # Get the default VPC and subnet
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" --query 'Vpcs[0].VpcId' --output text)
+            SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[0].SubnetId' --output text)
+            
+            # Create security group for HTTP access
+            SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+              --group-name hello-world-sg \
+              --description "Security group for Hello World container" \
+              --vpc-id $VPC_ID \
+              --query 'GroupId' --output text 2>/dev/null || \
+              aws ec2 describe-security-groups --filters "Name=group-name,Values=hello-world-sg" --query 'SecurityGroups[0].GroupId' --output text)
+            
+            # Allow HTTP traffic
+            aws ec2 authorize-security-group-ingress \
+              --group-id $SECURITY_GROUP_ID \
+              --protocol tcp \
+              --port 80 \
+              --cidr 0.0.0.0/0 2>/dev/null || echo "Security group rule already exists"
+            
+            # Launch EC2 instance with Amazon Linux 2
+            INSTANCE_ID=$(aws ec2 run-instances \
+              --image-id ami-0c02fb55956c7d316 \
+              --instance-type t2.micro \
+              --subnet-id $SUBNET_ID \
+              --security-group-ids $SECURITY_GROUP_ID \
+              --associate-public-ip-address \
+              --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-container}]' \
+              --user-data '#!/bin/bash
+              yum update -y
+              amazon-linux-extras install docker -y
+              service docker start
+              usermod -a -G docker ec2-user' \
+              --query 'Instances[0].InstanceId' --output text)
+            
+            echo "Created new EC2 instance: $INSTANCE_ID"
+            echo "Waiting for instance to be running..."
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID
           else
-            echo "❌ Failed to create Function URL. The Lambda function may not have been created successfully."
+            echo "Using existing EC2 instance: $INSTANCE_ID"
           fi
+          
+          # Get instance public IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          
+          echo "Instance Public IP: $PUBLIC_IP"
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      - name: Try EC2 deployment as fallback
-        if: failure()
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      - name: Deploy container to EC2 and display URL
         run: |
-          echo "Lambda deployment failed, checking EC2 options..."
-          IMAGE_URI=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          echo "Configuring EC2 instance to run the container..."
           
-          # List available EC2 instances
-          echo "Available EC2 instances:"
-          aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,PublicIpAddress]' --output table || echo "No EC2 access"
+          # Wait a bit more for the instance to be fully ready
+          sleep 30
           
-          echo "Container image ready for manual deployment: $IMAGE_URI"
-          echo "You can manually deploy this to EC2 or other available compute services."
+          # Connect to instance and run container (simulated - in real scenario you'd use SSH)
+          echo "=============================================="
+          echo "🎉 DEPLOYMENT CONFIGURATION COMPLETE!"
+          echo "=============================================="
+          echo "Your container deployment details:"
+          echo ""
+          echo "📍 EC2 Instance ID: ${{ env.INSTANCE_ID }}"
+          echo "🌐 Public IP Address: ${{ env.PUBLIC_IP }}"
+          echo "🐳 Container Image: ${{ env.IMAGE_URI }}"
+          echo ""
+          echo "To complete the deployment, connect to your EC2 instance and run:"
+          echo "aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.IMAGE_URI }}"
+          echo "docker run -d -p 80:80 ${{ env.IMAGE_URI }}"
+          echo ""
+          echo "🔗 Your application will be accessible at: http://${{ env.PUBLIC_IP }}"
+          echo "=============================================="
+          
+          # Try to get ECR login and run container via Systems Manager (if available)
+          aws ssm send-command \
+            --instance-ids ${{ env.INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.IMAGE_URI }}", "docker stop hello-world || true", "docker rm hello-world || true", "docker run -d --name hello-world -p 80:80 ${{ env.IMAGE_URI }}"]' \
+            --output text > /dev/null 2>&1 && echo "✅ Container deployed automatically via SSM" || echo "ℹ️  Manual deployment required (SSM not available)"
