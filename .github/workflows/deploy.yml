@@ -78,8 +78,7 @@ jobs:
               --cidr 0.0.0.0/0 2>/dev/null || echo "Security group rule already exists"
             
             # Create user data script to automatically setup and run container
-            USER_DATA=$(cat << 'EOF'
-#!/bin/bash
+            USER_DATA='#!/bin/bash
 yum update -y
 amazon-linux-extras install docker -y
 service docker start
@@ -98,9 +97,7 @@ aws ecr get-login-password --region us-east-1 | docker login --username AWS --pa
 docker run -d --name hello-world -p 80:80 IMAGE_URI_PLACEHOLDER
 
 # Create a simple health check
-echo "Container deployment completed" > /var/log/container-deploy.log
-EOF
-)
+echo "Container deployment completed" > /var/log/container-deploy.log'
             
             # Replace placeholder with actual image URI
             USER_DATA_FINAL=$(echo "$USER_DATA" | sed "s|IMAGE_URI_PLACEHOLDER|$IMAGE_URI|g")
