@@ -175,7 +175,7 @@ jobs:
               "docker stop hello-world || true",
               "docker rm hello-world || true",
               "docker pull ${{ env.IMAGE_URI }}",
-              "docker run -d --name hello-world -p 80:80 ${{ env.IMAGE_URI }}",
+              "docker run -d --name hello-world -p 80:80 200186773643.dkr.ecr.us-east-1.amazonaws.com/hello-world-repo,
               "echo \"Container updated successfully\" > /var/log/container-update.log"
             ]' \
             --query 'Command.CommandId' --output text 2>/dev/null || echo "")
