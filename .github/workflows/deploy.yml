@@ -108,6 +108,17 @@ jobs:
             unzip awscliv2.zip
             ./aws/install
             sleep 10
+            mkdir -p /home/ec2-user/.aws
+            cat <<EOF > /home/ec2-user/.aws/credentials
+            [default]
+            aws_access_key_id=${AWS_ACCESS_KEY_ID}
+            aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}
+            aws_session_token=${AWS_SESSION_TOKEN}
+            EOF
+            chown -R ec2-user:ec2-user /home/ec2-user/.aws
+            export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+            export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+            export AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
             aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin IMAGE_URI_PLACEHOLDER
             docker run -d --name hello-world -p 80:80 IMAGE_URI_PLACEHOLDER
             echo \"Container deployment completed\" > /var/log/container-deploy.log"
