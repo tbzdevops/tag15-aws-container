@@ -119,8 +119,7 @@ jobs:
             export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
             export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
             export AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
-            aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin IMAGE_URI_PLACEHOLDER
-            docker run -d --name hello-world -p 80:80 IMAGE_URI_PLACEHOLDER
+            aws ecr get-login-password --region us-east-1  | docker login --username AWS --password-stdin 200186773643.dkr.ecr.us-east-1.amazonaws.com/hello-world-repo
             echo \"Container deployment completed\" > /var/log/container-deploy.log"
             
             # Replace placeholder with actual image URI
