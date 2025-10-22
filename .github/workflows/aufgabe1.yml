@@ -19,6 +19,7 @@ jobs:
           context: ./hello-world
           file: ./hello-world/Dockerfile
           push: false
+          load: true
           tags: hello-docker-ci:latest
 
       - name: Run Container for Test
