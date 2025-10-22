@@ -17,7 +17,7 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: .
-          file: ./Dockerfile
+          file: ../hello-world/Dockerfile
           push: false
           tags: hello-docker-ci:latest
 
