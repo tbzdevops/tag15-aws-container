@@ -1,0 +1,110 @@
+name: Aufgabe 3 - EC2 Deployment
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  setup-ec2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Create EC2 instance and install Docker
+        run: |
+          # Create a security group for our instance
+          aws ec2 create-security-group \
+            --group-name hello-world-sg \
+            --description "Security group for hello-world app" || true
+
+          # Allow inbound traffic on port 8080 and SSH
+          aws ec2 authorize-security-group-ingress \
+            --group-name hello-world-sg \
+            --protocol tcp \
+            --port 8080 \
+            --cidr 0.0.0.0/0 || true
+          
+          aws ec2 authorize-security-group-ingress \
+            --group-name hello-world-sg \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0 || true
+
+          # Create EC2 instance if it doesn't exist
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=hello-world-instance" \
+            --query 'Reservations[*].Instances[*].InstanceId' \
+            --output text)
+
+          if [ -z "$INSTANCE_ID" ]; then
+            # Create a key pair for SSH access
+            aws ec2 create-key-pair --key-name hello-world-key --query 'KeyMaterial' --output text > hello-world-key.pem
+            chmod 400 hello-world-key.pem
+
+            # Launch EC2 instance
+            INSTANCE_ID=$(aws ec2 run-instances \
+              --image-id ami-0261755bbcb8c4a84 \
+              --instance-type t2.micro \
+              --security-groups hello-world-sg \
+              --key-name hello-world-key \
+              --user-data '#!/bin/bash
+                apt-get update
+                apt-get install -y docker.io
+                systemctl start docker
+                systemctl enable docker' \
+              --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-instance}]' \
+              --query 'Instances[0].InstanceId' \
+              --output text)
+
+            # Wait for instance to be running
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          fi
+
+          # Store instance ID for later use
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          
+          # Get instance public IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+  deploy:
+    needs: setup-ec2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deploy to EC2
+        run: |
+          # Get ECR login password
+          ECR_PASSWORD=$(aws ecr get-login-password)
+          
+          # SSH into instance and run container
+          ssh -o StrictHostKeyChecking=no -i hello-world-key.pem ubuntu@${{ env.PUBLIC_IP }} "\
+            # Login to ECR
+            echo $ECR_PASSWORD | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} && \
+            # Stop and remove existing container if it exists
+            docker rm -f hello-world || true && \
+            # Run new container
+            docker run -d --name hello-world -p 8080:8080 ${{ steps.login-ecr.outputs.registry }}/hello-world:latest"
