@@ -130,8 +130,17 @@ jobs:
             --description "Security group for hello-world app" \
             --query 'GroupId' \
             --output text)
+          
+          if [ -z "$SECURITY_GROUP_ID" ]; then
+            echo "Error: Failed to create security group"
+            exit 1
+          fi
             
           echo "Created security group: $SECURITY_GROUP_ID"
+          
+          # Wait for security group to be available
+          echo "Waiting for security group to be available..."
+          sleep 5
 
           # Add tags to security group
           aws ec2 create-tags \
@@ -171,11 +180,24 @@ jobs:
           echo "Public key:"
           cat hello-world-key.pem.pub
 
+          # Verify security group exists
+          echo "Verifying security group ID: $SECURITY_GROUP_ID"
+          if [ -z "$SECURITY_GROUP_ID" ]; then
+            echo "Error: Security group ID is empty"
+            exit 1
+          fi
+          
+          if ! aws ec2 describe-security-groups --group-ids "$SECURITY_GROUP_ID" >/dev/null 2>&1; then
+            echo "Error: Security group $SECURITY_GROUP_ID does not exist"
+            exit 1
+          fi
+          
           # Launch new EC2 instance with Ubuntu 22.04 LTS
+          echo "Launching new EC2 instance with security group $SECURITY_GROUP_ID"
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-0261755bbcb8c4a84 \
             --instance-type t2.micro \
-            --security-group-ids $SECURITY_GROUP_ID \
+            --security-groups "$SG_NAME" \
             --key-name hello-world-key \
             --user-data '#!/bin/bash
               echo "Starting user data script execution..."
@@ -189,6 +211,11 @@ jobs:
             --query 'Instances[0].InstanceId' \
             --output text)
 
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "Error: Failed to create instance"
+            exit 1
+          fi
+          
           echo "New instance ID: $INSTANCE_ID"
           
           # Wait for instance to be running
