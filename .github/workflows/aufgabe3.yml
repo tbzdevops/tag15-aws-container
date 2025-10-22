@@ -20,49 +20,88 @@ jobs:
 
       - name: Create EC2 instance and install Docker
         run: |
+          # Terminate existing instance if it exists
+          EXISTING_INSTANCE=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=hello-world-instance" "Name=instance-state-name,Values=running,pending" \
+            --query 'Reservations[*].Instances[*].InstanceId' \
+            --output text)
+            
+          if [ ! -z "$EXISTING_INSTANCE" ]; then
+            echo "Terminating existing instance..."
+            aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCE
+            aws ec2 wait instance-terminated --instance-ids $EXISTING_INSTANCE
+          fi
+
+          # Delete old security group if it exists
+          aws ec2 delete-security-group --group-name hello-world-sg || true
+          sleep 5
+
           # Create a security group for our instance
-          aws ec2 create-security-group \
+          SECURITY_GROUP_ID=$(aws ec2 create-security-group \
             --group-name hello-world-sg \
-            --description "Security group for hello-world app" || true
+            --description "Security group for hello-world app" \
+            --query 'GroupId' \
+            --output text)
 
           # Allow inbound traffic on port 8080 and SSH
           aws ec2 authorize-security-group-ingress \
-            --group-name hello-world-sg \
+            --group-id $SECURITY_GROUP_ID \
             --protocol tcp \
             --port 8080 \
-            --cidr 0.0.0.0/0 || true
+            --cidr 0.0.0.0/0
           
           aws ec2 authorize-security-group-ingress \
-            --group-name hello-world-sg \
+            --group-id $SECURITY_GROUP_ID \
             --protocol tcp \
             --port 22 \
-            --cidr 0.0.0.0/0 || true
+            --cidr 0.0.0.0/0
 
-          # Create EC2 instance if it doesn't exist
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=hello-world-instance" \
-            --query 'Reservations[*].Instances[*].InstanceId' \
-            --output text)
-
-          # Create a key pair for SSH access (recreate it each time to ensure we have it)
+          # Create a new key pair
           aws ec2 delete-key-pair --key-name hello-world-key || true
-          aws ec2 wait key-pair-deleted --key-names hello-world-key || true
+          sleep 5
           
-          # Create new key pair (using RSA for better compatibility)
-          aws ec2 create-key-pair \
-            --key-name hello-world-key \
-            --key-type rsa \
-            --key-format pem \
-            --query "KeyMaterial" \
-            --output text > hello-world-key.pem
-            
+          # Generate a local SSH key pair
+          ssh-keygen -t rsa -b 2048 -f hello-world-key.pem -N ""
           chmod 400 hello-world-key.pem
           
-          # Debug: Check if key file exists and show beginning of key
+          # Import the public key to AWS
+          aws ec2 import-key-pair \
+            --key-name hello-world-key \
+            --public-key-material fileb://hello-world-key.pem.pub
+          
+          # Debug: Show the key details
+          echo "Private key:"
           ls -la hello-world-key.pem
-          head -n 1 hello-world-key.pem
+          echo "Public key:"
+          cat hello-world-key.pem.pub
 
-          if [ -z "$INSTANCE_ID" ]; then
+          # Launch new EC2 instance with Ubuntu 22.04 LTS
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ami-0261755bbcb8c4a84 \
+            --instance-type t2.micro \
+            --security-group-ids $SECURITY_GROUP_ID \
+            --key-name hello-world-key \
+            --user-data '#!/bin/bash
+              echo "Starting user data script execution..."
+              apt-get update
+              apt-get install -y docker.io
+              systemctl start docker
+              systemctl enable docker
+              usermod -aG docker ubuntu
+              echo "User data script completed."' \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-instance}]' \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "New instance ID: $INSTANCE_ID"
+          
+          # Wait for instance to be running
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+          
+          # Give extra time for initialization
+          echo "Waiting 60 seconds for full initialization..."
+          sleep 60
 
             # Launch EC2 instance with more detailed user data
             INSTANCE_ID=$(aws ec2 run-instances \
@@ -195,12 +234,14 @@ jobs:
           # Try to get cloud-init status via SSH
           for i in {1..5}; do
             echo "Attempt $i: Testing SSH connection..."
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i hello-world-key.pem ubuntu@$PUBLIC_IP "cloud-init status"; then
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i hello-world-key.pem -vvv ubuntu@$PUBLIC_IP "echo 'SSH connection successful!'"; then
               echo "SSH connection successful!"
               break
             fi
-            echo "Waiting 10 seconds before retry..."
-            sleep 10
+            if [ $i -lt 5 ]; then
+              echo "Waiting 20 seconds before retry..."
+              sleep 20
+            fi
           done
           
           # SSH into instance and run container
