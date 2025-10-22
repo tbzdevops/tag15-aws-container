@@ -46,11 +46,21 @@ jobs:
 
           # Create a key pair for SSH access (recreate it each time to ensure we have it)
           aws ec2 delete-key-pair --key-name hello-world-key || true
-          aws ec2 create-key-pair --key-name hello-world-key --query 'KeyMaterial' --output text > hello-world-key.pem
+          aws ec2 wait key-pair-deleted --key-names hello-world-key || true
+          
+          # Create new key pair and save in OpenSSH format
+          aws ec2 create-key-pair \
+            --key-name hello-world-key \
+            --key-type ed25519 \
+            --key-format pem \
+            --query "KeyMaterial" \
+            --output text > hello-world-key.pem
+            
           chmod 400 hello-world-key.pem
           
-          # Debug: Check if key file exists
+          # Debug: Check if key file exists and show beginning of key
           ls -la hello-world-key.pem
+          head -n 1 hello-world-key.pem
 
           if [ -z "$INSTANCE_ID" ]; then
 
@@ -69,8 +79,9 @@ jobs:
               --query 'Instances[0].InstanceId' \
               --output text)
 
-            # Wait for instance to be running
+            # Wait for instance to be running and status checks to complete
             aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
           fi
 
           # Store instance ID for later use
@@ -160,6 +171,12 @@ jobs:
           ECR_PASSWORD=$(aws ecr get-login-password)
           
           echo "Attempting to SSH to $PUBLIC_IP..."
+          
+          # Debug: Test SSH connection first
+          ssh -v -o StrictHostKeyChecking=no -i hello-world-key.pem ubuntu@$PUBLIC_IP "echo 'SSH connection successful'"
+          
+          # Wait a moment to ensure the instance is fully ready
+          sleep 10
           
           # SSH into instance and run container
           ssh -v -o StrictHostKeyChecking=no -i hello-world-key.pem ubuntu@$PUBLIC_IP "\
