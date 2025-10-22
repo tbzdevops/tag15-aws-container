@@ -16,8 +16,8 @@ jobs:
       - name: Build Docker Image
         uses: docker/build-push-action@v4
         with:
-          context: .
-          file: ../hello-world/Dockerfile
+          context: ./hello-world
+          file: ./Dockerfile
           push: false
           tags: hello-docker-ci:latest
 
