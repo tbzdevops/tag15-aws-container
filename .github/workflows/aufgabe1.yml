@@ -1,0 +1,29 @@
+name: CI Build
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: hello-docker-ci:latest
+
+      - name: Run Container for Test
+        run: |
+          docker run -d --name test-container -p 8080:8080 hello-docker-ci:latest
+          sleep 5
+          curl http://localhost:8080 || exit 1
+          docker stop test-container
