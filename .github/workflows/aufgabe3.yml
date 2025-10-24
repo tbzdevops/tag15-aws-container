@@ -64,27 +64,24 @@ jobs:
           #!/bin/bash
           set -e
           
-          # Check if instance already exists
-          echo "Checking for existing instances..."
+          # Terminate any existing instances with this tag
+          echo "Checking for and terminating existing instances..."
           EXISTING_INSTANCES=$(aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=hello-world-instance" \
-            "Name=instance-state-name,Values=running" \
-            --query 'Reservations[*].Instances[0].[InstanceId,PublicIpAddress]' \
+            "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[*].Instances[*].InstanceId' \
             --output text)
           
           if [ ! -z "$EXISTING_INSTANCES" ]; then
-            echo "Found existing running instance!"
-            INSTANCE_ID=$(echo "$EXISTING_INSTANCES" | awk '{print $1}')
-            PUBLIC_IP=$(echo "$EXISTING_INSTANCES" | awk '{print $2}')
-            echo "Instance ID: $INSTANCE_ID"
-            echo "Public IP: $PUBLIC_IP"
-            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-            echo "Using existing instance, skipping creation..."
-            exit 0
+            echo "Found existing instances: $EXISTING_INSTANCES"
+            echo "Terminating existing instances..."
+            aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCES
+            echo "Waiting for instances to terminate..."
+            aws ec2 wait instance-terminated --instance-ids $EXISTING_INSTANCES
+            sleep 10
           fi
           
-          echo "No existing instance found, creating new one..."
+          echo "Creating fresh EC2 instance..."
           
           # Delete old key pair if it exists
           aws ec2 delete-key-pair --key-name hello-world-key 2>/dev/null || true
@@ -214,6 +211,15 @@ jobs:
         run: |
           #!/bin/bash
           set -e
+          
+          # Verify SSH key exists and has correct permissions
+          if [ ! -f "hello-world-key.pem" ]; then
+            echo "Error: SSH private key not found!"
+            exit 1
+          fi
+          
+          echo "SSH key file verified"
+          ls -la hello-world-key.pem
           
           # Use provided IMAGE_URI or get ECR password to construct it
           if [ -z "$IMAGE_URI" ]; then
