@@ -191,7 +191,7 @@ jobs:
             echo "Error: Security group $SECURITY_GROUP_ID does not exist"
             exit 1
           fi
-          
+           
           # Launch new EC2 instance with Ubuntu 22.04 LTS
           echo "Launching new EC2 instance with security group $SECURITY_GROUP_ID"
           INSTANCE_ID=$(aws ec2 run-instances \
