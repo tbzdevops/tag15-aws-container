@@ -1,12 +1,14 @@
-name: Aufgabe 3 - Lambda Deployment
+name: Aufgabe 3 - EC2 Deployment with ECR
 
 on:
   push:
     branches: [ "main" ]
 
 jobs:
-  deploy-lambda:
+  build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      image-uri: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@v3
 
@@ -22,59 +24,280 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build and push Docker image to ECR
+      - name: Build, tag, and push image to Amazon ECR
+        id: image
+        working-directory: ./hello-world
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: hello-world
           IMAGE_TAG: latest
         run: |
-          cd hello-world
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Pushed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      - name: Create or update Lambda function
+  setup-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    outputs:
+      instance-id: ${{ env.INSTANCE_ID }}
+      public-ip: ${{ env.PUBLIC_IP }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Generate SSH key pair
         run: |
-          FUNCTION_NAME="hello-world"
-          IMAGE_URI="${{ env.IMAGE_URI }}"
-          ROLE_ARN="arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/LabRole"
+          ssh-keygen -t rsa -b 2048 -f hello-world-key.pem -N ""
+          chmod 400 hello-world-key.pem
+
+      - name: Create EC2 instance
+        run: |
+          #!/bin/bash
+          set -e
           
-          # Check if function exists
-          if aws lambda get-function --function-name "$FUNCTION_NAME" 2>/dev/null; then
-            echo "Updating existing Lambda function..."
-            aws lambda update-function-code \
-              --function-name "$FUNCTION_NAME" \
-              --image-uri "$IMAGE_URI"
-            
-            # Wait for update to complete
-            aws lambda wait function-updated --function-name "$FUNCTION_NAME"
-            echo "Lambda function updated successfully"
-          else
-            echo "Creating new Lambda function..."
-            aws lambda create-function \
-              --function-name "$FUNCTION_NAME" \
-              --role "$ROLE_ARN" \
-              --code ImageUri="$IMAGE_URI" \
-              --package-type Image \
-              --timeout 60 \
-              --memory-size 128 \
-              --description "Hello World Lambda function"
-            echo "Lambda function created successfully"
+          # Clean up existing instances and security groups
+          echo "Cleaning up existing resources..."
+          
+          # Terminate existing instances
+          EXISTING_INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=hello-world-instance" \
+            "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[*].Instances[*].InstanceId' \
+            --output text)
+          
+          if [ ! -z "$EXISTING_INSTANCES" ]; then
+            echo "Terminating existing instances: $EXISTING_INSTANCES"
+            aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCES
+            aws ec2 wait instance-terminated --instance-ids $EXISTING_INSTANCES
+            sleep 10
           fi
           
-      - name: Test Lambda function
+          # Delete old security group if it exists
+          aws ec2 delete-security-group --group-name hello-world-sg 2>/dev/null || true
+          
+          # Delete old key pair if it exists
+          aws ec2 delete-key-pair --key-name hello-world-key 2>/dev/null || true
+          sleep 5
+          
+          # Import new key pair
+          echo "Importing SSH public key to AWS..."
+          aws ec2 import-key-pair \
+            --key-name hello-world-key \
+            --public-key-material fileb://hello-world-key.pem.pub
+          
+          # Create security group
+          echo "Creating security group..."
+          SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+            --group-name hello-world-sg \
+            --description "Security group for hello-world Docker app" \
+            --query 'GroupId' \
+            --output text)
+          
+          echo "Created security group: $SECURITY_GROUP_ID"
+          sleep 5
+          
+          # Add tags
+          aws ec2 create-tags \
+            --resources "$SECURITY_GROUP_ID" \
+            --tags "Key=Name,Value=hello-world-sg"
+          
+          # Allow SSH and port 8080
+          echo "Configuring security group rules..."
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP_ID" \
+            --protocol tcp \
+            --port 22 \
+            --cidr 0.0.0.0/0
+          
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP_ID" \
+            --protocol tcp \
+            --port 8080 \
+            --cidr 0.0.0.0/0
+          
+          # Launch EC2 instance
+          echo "Launching EC2 instance..."
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ami-0261755bbcb8c4a84 \
+            --instance-type t2.micro \
+            --security-group-ids "$SECURITY_GROUP_ID" \
+            --key-name hello-world-key \
+            --user-data '#!/bin/bash
+              apt-get update
+              apt-get install -y docker.io
+              systemctl start docker
+              systemctl enable docker
+              usermod -aG docker ubuntu' \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-instance}]' \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+          
+          echo "Instance ID: $INSTANCE_ID"
+          
+          # Wait for instance to be running and ready
+          echo "Waiting for instance to be running..."
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+          sleep 30
+          
+          # Get public IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "Instance launched successfully!"
+          echo "Instance ID: $INSTANCE_ID"
+          echo "Public IP: $PUBLIC_IP"
+
+      - name: Upload SSH key
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-key
+          path: hello-world-key.pem
+          retention-days: 1
+
+  deploy-container:
+    needs: [build-and-push, setup-ec2]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Download SSH key
+        uses: actions/download-artifact@v4
+        with:
+          name: ssh-key
+          path: .
+
+      - name: Set SSH key permissions
+        run: chmod 400 hello-world-key.pem
+
+      - name: Deploy container to EC2
+        env:
+          IMAGE_URI: ${{ needs.build-and-push.outputs.image-uri }}
         run: |
-          FUNCTION_NAME="hello-world"
+          #!/bin/bash
+          set -e
           
-          echo "Testing Lambda function..."
-          RESPONSE=$(aws lambda invoke \
-            --function-name "$FUNCTION_NAME" \
-            --payload '{}' \
-            --cli-binary-format raw-in-base64-out \
-            /tmp/response.json)
+          # Get instance details
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=hello-world-instance" \
+            "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
           
-          echo "Lambda Response:"
-          cat /tmp/response.json
+          if [ -z "$PUBLIC_IP" ]; then
+            echo "Error: Could not find running instance"
+            exit 1
+          fi
           
-          echo -e "\nInvocation Details:"
-          echo "$RESPONSE"
+          echo "Connecting to instance at $PUBLIC_IP..."
+          
+          # Get ECR login credentials
+          ECR_PASSWORD=$(aws ecr get-login-password)
+          ECR_REGISTRY=$(echo $IMAGE_URI | cut -d'/' -f1)
+          
+          # Test SSH connection with retries
+          echo "Testing SSH connection..."
+          for i in {1..10}; do
+            echo "Attempt $i: Testing SSH connection..."
+            if ssh -o StrictHostKeyChecking=no \
+                   -o ConnectTimeout=10 \
+                   -o UserKnownHostsFile=/dev/null \
+                   -i hello-world-key.pem \
+                   ubuntu@$PUBLIC_IP "echo 'SSH connection successful!'" 2>/dev/null; then
+              echo "SSH connection established!"
+              break
+            fi
+            if [ $i -lt 10 ]; then
+              echo "Waiting 15 seconds before retry..."
+              sleep 15
+            else
+              echo "Error: Could not establish SSH connection after 10 attempts"
+              exit 1
+            fi
+          done
+          
+          # Deploy container
+          echo "Deploying container to EC2..."
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -i hello-world-key.pem \
+              ubuntu@$PUBLIC_IP "
+            # Login to ECR
+            echo '$ECR_PASSWORD' | docker login --username AWS --password-stdin $ECR_REGISTRY
+            
+            # Stop and remove existing container if it exists
+            docker rm -f hello-world || true
+            
+            # Pull and run the new container
+            docker pull $IMAGE_URI
+            docker run -d \
+              --name hello-world \
+              -p 8080:8080 \
+              $IMAGE_URI
+            
+            # Wait for container to be ready
+            sleep 5
+            
+            # Check if container is running
+            if docker ps | grep -q hello-world; then
+              echo 'Container deployed successfully!'
+              docker ps
+            else
+              echo 'Error: Container failed to start'
+              docker logs hello-world
+              exit 1
+            fi
+          "
+          
+          echo "Deployment completed!"
+          echo "Access the application at: http://$PUBLIC_IP:8080"
+
+      - name: Verify deployment
+        run: |
+          # Get instance IP
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=hello-world-instance" \
+            "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          echo "Verifying deployment..."
+          echo "Instance IP: $PUBLIC_IP"
+          
+          # Test the application
+          for i in {1..5}; do
+            echo "Attempt $i: Testing application..."
+            if curl -s http://$PUBLIC_IP:8080 | grep -q "Hello, World"; then
+              echo "✓ Application is responding correctly!"
+              exit 0
+            fi
+            if [ $i -lt 5 ]; then
+              echo "Waiting 10 seconds before retry..."
+              sleep 10
+            fi
+          done
+          
+          echo "Warning: Could not verify application response, but deployment may still be working"
