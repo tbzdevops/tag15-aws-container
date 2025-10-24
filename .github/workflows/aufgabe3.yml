@@ -197,7 +197,7 @@ jobs:
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-0261755bbcb8c4a84 \
             --instance-type t2.micro \
-            --security-groups "$SG_NAME" \
+            --security-group-ids "$SECURITY_GROUP_ID" \
             --key-name hello-world-key \
             --user-data '#!/bin/bash
               echo "Starting user data script execution..."
