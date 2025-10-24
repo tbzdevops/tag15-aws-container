@@ -1,8 +1,14 @@
-# Use official Python image
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py ./
-EXPOSE 8080
-CMD ["python", "app.py"]
+# Use AWS Lambda Python 3.11 base image
+FROM public.ecr.aws/lambda/python:3.11
+
+# Copy requirements.txt
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+
+# Install dependencies
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+
+# Copy the lambda handler
+COPY app.py ${LAMBDA_TASK_ROOT}/
+
+# Set the CMD to your handler
+CMD ["app.lambda_handler"]
