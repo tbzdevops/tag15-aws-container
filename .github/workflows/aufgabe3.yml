@@ -216,7 +216,10 @@ jobs:
           
           # Get ECR login credentials
           ECR_PASSWORD=$(aws ecr get-login-password)
-          ECR_REGISTRY=$(echo $IMAGE_URI | cut -d'/' -f1)
+          ECR_REGISTRY=$(echo "$IMAGE_URI" | cut -d'/' -f1)
+          
+          echo "ECR Registry: $ECR_REGISTRY"
+          echo "Image URI: $IMAGE_URI"
           
           # Test SSH connection with retries
           echo "Testing SSH connection..."
@@ -239,38 +242,58 @@ jobs:
             fi
           done
           
-          # Deploy container
+          # Create a temporary script file for deployment
+          cat > /tmp/deploy.sh << 'DEPLOY_SCRIPT'
+          #!/bin/bash
+          set -e
+          
+          ECR_PASSWORD="$1"
+          ECR_REGISTRY="$2"
+          IMAGE_URI="$3"
+          
           echo "Deploying container to EC2..."
+          
+          # Login to ECR
+          echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          
+          # Stop and remove existing container if it exists
+          docker rm -f hello-world || true
+          
+          # Pull and run the new container
+          docker pull "$IMAGE_URI"
+          docker run -d \
+            --name hello-world \
+            -p 8080:8080 \
+            "$IMAGE_URI"
+          
+          # Wait for container to be ready
+          sleep 5
+          
+          # Check if container is running
+          if docker ps | grep -q hello-world; then
+            echo "Container deployed successfully!"
+            docker ps
+          else
+            echo "Error: Container failed to start"
+            docker logs hello-world || true
+            exit 1
+          fi
+          DEPLOY_SCRIPT
+          
+          chmod +x /tmp/deploy.sh
+          
+          # Transfer and execute deployment script
+          echo "Transferring deployment script..."
+          scp -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -i hello-world-key.pem \
+              /tmp/deploy.sh ubuntu@$PUBLIC_IP:/tmp/deploy.sh
+          
+          echo "Executing deployment script..."
           ssh -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               -i hello-world-key.pem \
-              ubuntu@$PUBLIC_IP "
-            # Login to ECR
-            echo '$ECR_PASSWORD' | docker login --username AWS --password-stdin $ECR_REGISTRY
-            
-            # Stop and remove existing container if it exists
-            docker rm -f hello-world || true
-            
-            # Pull and run the new container
-            docker pull $IMAGE_URI
-            docker run -d \
-              --name hello-world \
-              -p 8080:8080 \
-              $IMAGE_URI
-            
-            # Wait for container to be ready
-            sleep 5
-            
-            # Check if container is running
-            if docker ps | grep -q hello-world; then
-              echo 'Container deployed successfully!'
-              docker ps
-            else
-              echo 'Error: Container failed to start'
-              docker logs hello-world
-              exit 1
-            fi
-          "
+              ubuntu@$PUBLIC_IP /tmp/deploy.sh "$ECR_PASSWORD" "$ECR_REGISTRY" "$IMAGE_URI"
           
           echo "Deployment completed!"
           echo "Access the application at: http://$PUBLIC_IP:8080"
