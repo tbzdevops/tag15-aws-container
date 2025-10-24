@@ -148,7 +148,9 @@ jobs:
               apt-get install -y docker.io
               systemctl start docker
               systemctl enable docker
-              usermod -aG docker ubuntu' \
+              usermod -aG docker ubuntu
+              # Ensure SSH service is restarted to handle new keys
+              systemctl restart ssh' \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-instance}]' \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -245,21 +247,36 @@ jobs:
           
           # Test SSH connection with retries
           echo "Testing SSH connection..."
-          for i in {1..10}; do
-            echo "Attempt $i: Testing SSH connection..."
+          for i in {1..15}; do
+            echo "Attempt $i: Testing SSH connection to ubuntu@$PUBLIC_IP..."
+            
+            # Attempt SSH connection with aggressive retry settings
             if ssh -o StrictHostKeyChecking=no \
-                   -o ConnectTimeout=10 \
+                   -o ConnectTimeout=5 \
+                   -o BatchMode=yes \
                    -o UserKnownHostsFile=/dev/null \
+                   -o PreferredAuthentications=publickey \
                    -i hello-world-key.pem \
                    ubuntu@$PUBLIC_IP "echo 'SSH connection successful!'" 2>/dev/null; then
               echo "SSH connection established!"
               break
-            fi
-            if [ $i -lt 10 ]; then
-              echo "Waiting 15 seconds before retry..."
-              sleep 15
             else
-              echo "Error: Could not establish SSH connection after 10 attempts"
+              echo "SSH not yet available, retrying..."
+            fi
+            
+            if [ $i -lt 15 ]; then
+              echo "Waiting 10 seconds before retry..."
+              sleep 10
+            else
+              echo "Error: Could not establish SSH connection after 15 attempts"
+              echo "Debugging information:"
+              echo "Public IP: $PUBLIC_IP"
+              echo "Key file exists: $([ -f hello-world-key.pem ] && echo 'yes' || echo 'no')"
+              echo "Attempting SSH with verbose output for diagnostics..."
+              ssh -v -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null \
+                  -i hello-world-key.pem \
+                  ubuntu@$PUBLIC_IP "echo 'test'" || true
               exit 1
             fi
           done
