@@ -64,29 +64,31 @@ jobs:
           #!/bin/bash
           set -e
           
-          # Clean up existing instances and security groups
-          echo "Cleaning up existing resources..."
-          
-          # Terminate existing instances
+          # Check if instance already exists
+          echo "Checking for existing instances..."
           EXISTING_INSTANCES=$(aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=hello-world-instance" \
-            "Name=instance-state-name,Values=running,pending,stopping,stopped" \
-            --query 'Reservations[*].Instances[*].InstanceId' \
+            "Name=instance-state-name,Values=running" \
+            --query 'Reservations[*].Instances[0].[InstanceId,PublicIpAddress]' \
             --output text)
           
           if [ ! -z "$EXISTING_INSTANCES" ]; then
-            echo "Terminating existing instances: $EXISTING_INSTANCES"
-            aws ec2 terminate-instances --instance-ids $EXISTING_INSTANCES
-            aws ec2 wait instance-terminated --instance-ids $EXISTING_INSTANCES
-            sleep 10
+            echo "Found existing running instance!"
+            INSTANCE_ID=$(echo "$EXISTING_INSTANCES" | awk '{print $1}')
+            PUBLIC_IP=$(echo "$EXISTING_INSTANCES" | awk '{print $2}')
+            echo "Instance ID: $INSTANCE_ID"
+            echo "Public IP: $PUBLIC_IP"
+            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+            echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+            echo "Using existing instance, skipping creation..."
+            exit 0
           fi
           
-          # Delete old security group if it exists
-          aws ec2 delete-security-group --group-name hello-world-sg 2>/dev/null || true
+          echo "No existing instance found, creating new one..."
           
           # Delete old key pair if it exists
           aws ec2 delete-key-pair --key-name hello-world-key 2>/dev/null || true
-          sleep 5
+          sleep 3
           
           # Import new key pair
           echo "Importing SSH public key to AWS..."
@@ -94,35 +96,45 @@ jobs:
             --key-name hello-world-key \
             --public-key-material fileb://hello-world-key.pem.pub
           
-          # Create security group
-          echo "Creating security group..."
-          SECURITY_GROUP_ID=$(aws ec2 create-security-group \
-            --group-name hello-world-sg \
-            --description "Security group for hello-world Docker app" \
-            --query 'GroupId' \
-            --output text)
+          # Check if security group already exists
+          SECURITY_GROUP_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=hello-world-sg" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text 2>/dev/null || echo "")
           
-          echo "Created security group: $SECURITY_GROUP_ID"
-          sleep 5
-          
-          # Add tags
-          aws ec2 create-tags \
-            --resources "$SECURITY_GROUP_ID" \
-            --tags "Key=Name,Value=hello-world-sg"
-          
-          # Allow SSH and port 8080
-          echo "Configuring security group rules..."
-          aws ec2 authorize-security-group-ingress \
-            --group-id "$SECURITY_GROUP_ID" \
-            --protocol tcp \
-            --port 22 \
-            --cidr 0.0.0.0/0
-          
-          aws ec2 authorize-security-group-ingress \
-            --group-id "$SECURITY_GROUP_ID" \
-            --protocol tcp \
-            --port 8080 \
-            --cidr 0.0.0.0/0
+          if [ "$SECURITY_GROUP_ID" = "None" ] || [ -z "$SECURITY_GROUP_ID" ]; then
+            # Create security group
+            echo "Creating security group..."
+            SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+              --group-name hello-world-sg \
+              --description "Security group for hello-world Docker app" \
+              --query 'GroupId' \
+              --output text)
+            
+            echo "Created security group: $SECURITY_GROUP_ID"
+            sleep 5
+            
+            # Add tags
+            aws ec2 create-tags \
+              --resources "$SECURITY_GROUP_ID" \
+              --tags "Key=Name,Value=hello-world-sg"
+            
+            # Allow SSH and port 8080
+            echo "Configuring security group rules..."
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SECURITY_GROUP_ID" \
+              --protocol tcp \
+              --port 22 \
+              --cidr 0.0.0.0/0
+            
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SECURITY_GROUP_ID" \
+              --protocol tcp \
+              --port 8080 \
+              --cidr 0.0.0.0/0
+          else
+            echo "Using existing security group: $SECURITY_GROUP_ID"
+          fi
           
           # Launch EC2 instance
           echo "Launching EC2 instance..."
@@ -196,9 +208,19 @@ jobs:
       - name: Deploy container to EC2
         env:
           IMAGE_URI: ${{ needs.build-and-push.outputs.image-uri }}
+          ECR_PASSWORD: ${{ secrets.ECR_PASSWORD }}
         run: |
           #!/bin/bash
           set -e
+          
+          # Use provided IMAGE_URI or get ECR password to construct it
+          if [ -z "$IMAGE_URI" ]; then
+            echo "Warning: IMAGE_URI is empty, getting from ECR..."
+            ECR_REGISTRY=$(aws ecr describe-repositories --repository-names hello-world --query 'repositories[0].repositoryUri' --output text | cut -d'/' -f1)
+            IMAGE_URI="$ECR_REGISTRY/hello-world:latest"
+          fi
+          
+          echo "Using Image URI: $IMAGE_URI"
           
           # Get instance details
           PUBLIC_IP=$(aws ec2 describe-instances \
@@ -252,15 +274,22 @@ jobs:
           IMAGE_URI="$3"
           
           echo "Deploying container to EC2..."
+          echo "Image URI: $IMAGE_URI"
+          echo "ECR Registry: $ECR_REGISTRY"
           
           # Login to ECR
+          echo "Logging in to ECR..."
           echo "$ECR_PASSWORD" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
           
           # Stop and remove existing container if it exists
+          echo "Stopping existing container..."
           docker rm -f hello-world || true
           
           # Pull and run the new container
+          echo "Pulling image..."
           docker pull "$IMAGE_URI"
+          
+          echo "Starting container..."
           docker run -d \
             --name hello-world \
             -p 8080:8080 \
