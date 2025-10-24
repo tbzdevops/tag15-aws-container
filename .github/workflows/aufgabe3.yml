@@ -26,11 +26,36 @@ jobs:
             local max_attempts=30
             local attempt=1
             
+            # First check if the security group exists
+            if ! aws ec2 describe-security-groups --group-names "$sg_name" >/dev/null 2>&1; then
+              echo "Security group $sg_name does not exist, no need to delete"
+              return 0
+            fi
+            
+            # Get the security group ID
+            local sg_id=$(aws ec2 describe-security-groups \
+              --group-names "$sg_name" \
+              --query 'SecurityGroups[0].GroupId' \
+              --output text)
+              
+            echo "Found security group $sg_name with ID $sg_id"
+            
+            # Check for and revoke all ingress rules
+            echo "Revoking ingress rules..."
+            aws ec2 describe-security-groups --group-ids "$sg_id" \
+              --query 'SecurityGroups[0].IpPermissions' \
+              --output json | \
+            jq -c '.[]' | while read -r rule; do
+              aws ec2 revoke-security-group-ingress \
+                --group-id "$sg_id" \
+                --cli-input-json "{\"GroupId\": \"$sg_id\", \"IpPermissions\": [$rule]}" || true
+            done
+            
             while [ $attempt -le $max_attempts ]; do
               echo "Attempt $attempt of $max_attempts: Checking security group dependencies..."
               
               # Try to delete the security group
-              if aws ec2 delete-security-group --group-name "$sg_name" 2>/dev/null; then
+              if aws ec2 delete-security-group --group-id "$sg_id" 2>/dev/null; then
                 echo "Security group deleted successfully"
                 return 0
               fi
@@ -225,46 +250,6 @@ jobs:
           # Give extra time for initialization
           echo "Waiting 60 seconds for full initialization..."
           sleep 60
-
-            # Launch EC2 instance with more detailed user data
-            INSTANCE_ID=$(aws ec2 run-instances \
-              --image-id ami-0261755bbcb8c4a84 \
-              --instance-type t2.micro \
-              --security-groups hello-world-sg \
-              --key-name hello-world-key \
-              --user-data '#!/bin/bash
-                # Redirect output to log file
-                exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-                echo "Starting user data script..."
-                
-                # Wait for cloud-init to complete
-                echo "Waiting for cloud-init..."
-                cloud-init status --wait
-                
-                echo "Updating system..."
-                apt-get update
-                apt-get install -y docker.io
-                
-                echo "Starting Docker..."
-                systemctl start docker
-                systemctl enable docker
-                
-                # Add ubuntu user to docker group
-                usermod -aG docker ubuntu
-                
-                echo "User data script completed."' \
-              --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=hello-world-instance}]' \
-              --query 'Instances[0].InstanceId' \
-              --output text)
-
-            # Wait for instance to be running and status checks to complete
-            aws ec2 wait instance-running --instance-ids $INSTANCE_ID
-            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
-            
-            # Give cloud-init extra time to complete
-            echo "Waiting 30 seconds for cloud-init to complete..."
-            sleep 30
-          fi
 
           # Store instance ID for later use
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
