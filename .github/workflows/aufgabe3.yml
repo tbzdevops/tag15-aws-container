@@ -374,5 +374,4 @@ jobs:
               sleep 10
             fi
           done
-          
           echo "Warning: Could not verify application response, but deployment may still be working"
